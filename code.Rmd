@@ -1,0 +1,188 @@
+---
+title: "PA-VA Proposal"
+author: "Andrew Windsheimer"
+date: "4/20/2021"
+output: html_document
+---
+```{r, message=FALSE, include=FALSE}
+library(ISLR)
+library(glmnet)
+library(pls)
+library(leaps)
+library(splines)
+library(gam)
+library(MASS)
+library(tree)
+library(randomForest)
+library(gbm)
+```
+
+```{r}
+#imports data
+train_init <- read.csv("~/train.csv")
+test_init <- read.csv("~/test.csv")
+
+#adjusts NA fireplaces
+train_init$fireplaces[is.na(train_init$fireplaces)] <- 0
+test_init$fireplaces[is.na(test_init$fireplaces)] <- 0
+
+#removes zip code
+train_init$zipcode <- NULL
+test_init$zipcode <- NULL
+
+#initializes train and test sets from given training data
+set.seed(1)
+train_rows <- sample(nrow(train_init), nrow(train_init)*.7)
+train <- train_init[train_rows,]
+test <- train_init[-train_rows,]
+
+######
+
+#Baseline
+mean_price <- mean(train$price)
+base_MSE <- mean((mean_price-test$price)^2)
+
+#LASSO
+x1 <- model.matrix(price~.-id, train_init)[,-2]
+
+lasso.fit <- cv.glmnet(x1[train_rows,], train$price, alpha=1)
+bestlam_l <- lasso.fit$lambda.min
+lasso.pred <- predict(lasso.fit, s=bestlam_l, newx=x1[-train_rows,])
+MSE_lasso <- mean((lasso.pred-test$price)^2)
+
+#Ridge
+ridge.fit <- cv.glmnet(x1[train_rows,], train$price, alpha=0)
+bestlam_r <- ridge.fit$lambda.min
+ridge.pred <- predict(ridge.fit, s=bestlam_r, newx=x1[-train_rows,])
+MSE_rr <- mean((ridge.pred-test$price)^2)
+
+#PCR
+pcr.fit <- pcr(price~.-id, data=train_init, subset=train_rows, validation="CV")
+#determine best value for ncomp
+validationplot(pcr.fit, val.type="MSEP")
+
+pcr.pred <- predict(pcr.fit, x1[-train_rows,], ncomp=7)
+MSE_pcr <- mean((pcr.pred-test$price)^2)
+
+#PLS
+pls.fit <- plsr(price~.-id, data=train_init, subset=train_rows, validation="CV")
+#determine best value for ncomp
+validationplot(pls.fit, val.type="MSEP")
+
+pls.pred <- predict(pls.fit, x1[-train_rows,], ncomp=7)
+MSE_pls <- mean((pls.pred-test$price)^2)
+
+#Linear
+lm.fit <- lm(price~., data=train[,-c(1,3)])
+lm.pred <- predict(lm.fit, test[,-c(1,3)])
+MSE_lm <- mean((lm.pred-test$price)^2)
+
+#Regression Tree
+tree.fit <- tree(price~.-id, train)
+cv.fit <- cv.tree(tree.fit)
+plot(cv.fit$size, cv.fit$dev, type='b')
+yhat <- predict(tree.fit, newdata=test)
+MSE_regtree <- mean((yhat-test$price)^2)
+
+#Bagged Trees
+bag_fit <- randomForest(price~.-id, data=train, mtry=14, importance=TRUE)
+yhat_bag <- predict(bag_fit, newdata=test)
+MSE_bag <- mean((yhat_bag-test$price)^2)
+
+#Random Forest
+mtrys <- seq(1, 14)
+mses <- rep(0, 14)
+
+#cv to determine mtry
+for(i in mtrys) {
+  rf_fit <- randomForest(price~.-id, data=train, mtry=i, importance=TRUE)
+  yhat_rf <- predict(rf_fit, newdata=test)
+  mses[[i]] <- mean((yhat_rf-test$price)^2)
+}
+which.min(mses)
+MSE_rf <- min(mses)
+rf_best <- randomForest(price~.-id, data=train, mtry=which.min(mses), importance=TRUE)
+
+#Boosted Trees
+boost_fit <- gbm(price~.-id, data=train, distribution="gaussian", n.trees=5000, interaction.depth=5)
+yhat_boost <- predict(boost_fit, newdata=test, n.trees=5000)
+MSE_boost <- mean((yhat_boost-test$price)^2)
+
+#summary of MSEs
+summary <- data.frame(c("baseline", "bagging", "boosting", "lasso", "linear", "pcr", "pls", "reg_tree", "random forest", "ridge"),c(base_MSE,MSE_bag, MSE_boost, MSE_lasso, MSE_lm, MSE_pcr, MSE_pls, MSE_regtree, MSE_rf, MSE_rr))
+names(summary) <- c("model", "MSE")
+summary$MSE <- summary$MSE/10000000000
+summary <- summary[order(summary$MSE),]
+summary
+```
+From this table we can see that applying regression trees in the contexts of bagging, boosting, and random forests leads to the lowest MSEs. 
+```{r}
+#generates oob estimates for bagging, boosting, and random forest
+summary(boost_fit)[order(-summary(boost_fit)$rel.inf),]
+rf_importance <- data.frame(importance(rf_fit))
+rf_importance[order(-rf_importance[,1]),]
+bag_importance <- data.frame(importance(bag_fit))
+bag_importance[order(-bag_importance[,1]),]
+```
+We now consider simpler models with only the most important predictors from each model.
+```{r}
+#Bagged Trees
+#most important vars from full model
+train_simple <- train[,names(train) %in% c("price", "sqft", "rooftype", "state")]
+
+bag_fit_simple <- randomForest(price~., data=train_simple, mtry=2, importance=TRUE)
+yhat_bag_simple <- predict(bag_fit_simple, newdata=test)
+MSE_bag_simple <- mean((yhat_bag_simple-test$price)^2)
+
+
+#Random Forest
+#most important vars from full model
+train_simple <- train[,names(train) %in% c("price", "sqft", "rooftype", "state")]
+
+#cv to determine mtry
+mtrys <- seq(1, 2)
+mses <- rep(0, 2)
+for(i in mtrys) {
+  rf_fit_simple <- randomForest(price~., data=train_simple, mtry=i, importance=TRUE)
+  yhat_rf_simple <- predict(rf_fit_simple, newdata=test)
+  mses[[i]] <- mean((yhat_rf_simple-test$price)^2)
+}
+which.min(mses)
+MSE_rf_simple <- min(mses)
+
+#Boosted Trees
+#most important vars from full model
+train_simple <- train[,names(train) %in% c("sqft", "bathrooms", "price")]
+
+boost_fit_simple <- gbm(price~., data=train_simple, distribution="gaussian", n.trees=5000, interaction.depth=5)
+yhat_boost_simple <- predict(boost_fit_simple, newdata=test, n.trees=5000)
+MSE_boost_simple <- mean((yhat_boost_simple-test$price)^2)
+
+#####
+
+#generates reduced summary
+summary_reduced <- data.frame(c("baseline", "bagging", "boosting", "random forest"),c(base_MSE, MSE_bag_simple, MSE_boost_simple, MSE_rf_simple))
+names(summary_reduced) <- c("model", "MSE")
+summary_reduced$MSE <- summary_reduced$MSE/10000000000
+summary_reduced <- summary_reduced[order(summary_reduced$MSE),]
+summary_reduced
+
+#illuminate relationship between chosen features and response
+#through a regression tree
+plot(tree(price~state+sqft+rooftype, train))
+text(tree(price~state+sqft+rooftype, train), pretty=0)
+
+#and linear regression
+summary(lm(price~state+sqft+rooftype, data=train))
+
+#generate final predictions
+train_init <- read.csv("~/train.csv")
+test_init <- read.csv("~/test.csv")
+
+bag_fit_final <- randomForest(price~state+sqft+rooftype, data=train_init, mtry=2)
+yhat_bag_final <- predict(bag_fit_final, newdata=test_init)
+
+#testing_predictions
+results <- data.frame(id=test_init$id, price=yhat_bag_final, student_id=4329907)
+write.csv(results, "testing_predictions_4329907.csv")
+```
